@@ -275,7 +275,7 @@ Title:"""
     messages = [{"role": "user", "content": title_prompt}]
 
     # Use gemini-2.5-flash for title generation (fast and cheap)
-    response = await query_model("google/gemini-2.5-flash", messages, timeout=30.0)
+    response = await query_model("deepseek-ai/DeepSeek-V3", messages, timeout=30.0)
 
     if response is None:
         # Fallback to a generic title
