@@ -196,5 +196,6 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
 
 if __name__ == "__main__":
     import uvicorn
-    # 注意：根据你的项目结构，有时需要改为 8000 端口，请根据实际部署调整
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    import os
+    port = int(os.environ.get("PORT", 8001))
+    uvicorn.run(app, host="0.0.0.0", port=port)

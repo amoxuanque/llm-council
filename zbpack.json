@@ -1,0 +1,4 @@
+{
+  "build_command": "pip install uv && uv sync",
+  "start_command": "python -m backend.main"
+}
