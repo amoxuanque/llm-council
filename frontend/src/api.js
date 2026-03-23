@@ -68,6 +68,7 @@ export const api = {
 
   /**
    * Send a message and receive streaming updates.
+   * Uses a line buffer to handle TCP chunk boundaries correctly.
    * @param {string} conversationId - The conversation ID
    * @param {string} content - The message content
    * @param {function} onEvent - Callback function for each event: (eventType, data) => void
@@ -91,13 +92,18 @@ export const api = {
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
+    let buffer = '';  // Buffer for incomplete lines across chunks
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      const chunk = decoder.decode(value);
-      const lines = chunk.split('\n');
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process all complete lines in the buffer
+      const lines = buffer.split('\n');
+      // Keep the last (potentially incomplete) line in the buffer
+      buffer = lines.pop();
 
       for (const line of lines) {
         if (line.startsWith('data: ')) {
@@ -109,6 +115,16 @@ export const api = {
             console.error('Failed to parse SSE event:', e);
           }
         }
+      }
+    }
+
+    // Process any remaining data in the buffer after stream ends
+    if (buffer.startsWith('data: ')) {
+      try {
+        const event = JSON.parse(buffer.slice(6));
+        onEvent(event.type, event);
+      } catch (e) {
+        // Ignore trailing incomplete data
       }
     }
   },
