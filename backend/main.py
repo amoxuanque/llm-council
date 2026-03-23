@@ -10,7 +10,11 @@ import json
 import asyncio
 
 import storage
-from council import run_full_council, generate_conversation_title, stage1_collect_responses, stage2_collect_rankings, stage3_synthesize_final, calculate_aggregate_rankings
+from council import (
+    run_full_council, generate_conversation_title,
+    stage1_collect_responses, stage2_collect_rankings,
+    stage3_synthesize_final, calculate_aggregate_rankings
+)
 from openrouter import close_client
 
 from contextlib import asynccontextmanager
@@ -102,7 +106,6 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
     is_first_message = len(conversation["messages"]) == 0
     storage.add_user_message(conversation_id, request.content)
 
-    # Run title generation in parallel with council processing when it's the first message
     if is_first_message:
         council_task = asyncio.create_task(run_full_council(request.content))
         title_task = asyncio.create_task(generate_conversation_title(request.content))
@@ -114,11 +117,13 @@ async def send_message(conversation_id: str, request: SendMessageRequest):
             request.content
         )
 
+    # Persist assistant message WITH metadata so it survives page refresh
     storage.add_assistant_message(
         conversation_id,
         stage1_results,
         stage2_results,
-        stage3_result
+        stage3_result,
+        metadata=metadata
     )
 
     return {
@@ -141,8 +146,16 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
     is_first_message = len(conversation["messages"]) == 0
 
     async def event_generator():
+        # Track state for cleanup on partial failure
+        stage1_results = None
+        stage2_results = None
+        stage3_result = None
+        metadata = None
+        user_message_saved = False
+
         try:
             storage.add_user_message(conversation_id, request.content)
+            user_message_saved = True
 
             title_task = None
             if is_first_message:
@@ -151,20 +164,21 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
             # Stage 1: Collect responses
             yield f"data: {json.dumps({'type': 'stage1_start'}, ensure_ascii=False)}\n\n"
             stage1_results = await stage1_collect_responses(request.content)
-            # 关键修复点：确保所有 yield 都加了 ensure_ascii=False
             yield f"data: {json.dumps({'type': 'stage1_complete', 'data': stage1_results}, ensure_ascii=False)}\n\n"
-            
+
             # Stage 2: Collect rankings
             yield f"data: {json.dumps({'type': 'stage2_start'}, ensure_ascii=False)}\n\n"
             stage2_results, label_to_model = await stage2_collect_rankings(request.content, stage1_results)
             aggregate_rankings = calculate_aggregate_rankings(stage2_results, label_to_model)
-            # 关键修复点：Stage 2 必须加 ensure_ascii=False，否则中文排名解析必崩
-            yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': {'label_to_model': label_to_model, 'aggregate_rankings': aggregate_rankings}}, ensure_ascii=False)}\n\n"
+            metadata = {
+                'label_to_model': label_to_model,
+                'aggregate_rankings': aggregate_rankings
+            }
+            yield f"data: {json.dumps({'type': 'stage2_complete', 'data': stage2_results, 'metadata': metadata}, ensure_ascii=False)}\n\n"
 
-            # Stage 3: Synthesize final answer (with aggregate rankings for better context)
+            # Stage 3: Synthesize final answer
             yield f"data: {json.dumps({'type': 'stage3_start'}, ensure_ascii=False)}\n\n"
             stage3_result = await stage3_synthesize_final(request.content, stage1_results, stage2_results, aggregate_rankings)
-            # 关键修复点：Stage 3 是最终答案，最容易出现 Unicode 报错
             yield f"data: {json.dumps({'type': 'stage3_complete', 'data': stage3_result}, ensure_ascii=False)}\n\n"
 
             if title_task:
@@ -172,16 +186,32 @@ async def send_message_stream(conversation_id: str, request: SendMessageRequest)
                 storage.update_conversation_title(conversation_id, title)
                 yield f"data: {json.dumps({'type': 'title_complete', 'data': {'title': title}}, ensure_ascii=False)}\n\n"
 
+            # Persist assistant message WITH metadata
             storage.add_assistant_message(
                 conversation_id,
                 stage1_results,
                 stage2_results,
-                stage3_result
+                stage3_result,
+                metadata=metadata
             )
 
             yield f"data: {json.dumps({'type': 'complete'}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
+            # If we saved the user message but failed to save assistant message,
+            # save a partial result so the conversation isn't left in a broken state
+            if user_message_saved and stage1_results and stage3_result is None:
+                try:
+                    storage.add_assistant_message(
+                        conversation_id,
+                        stage1_results or [],
+                        stage2_results or [],
+                        {"model": "error", "response": f"处理过程中出错: {str(e)}"},
+                        metadata=metadata
+                    )
+                except Exception:
+                    pass  # Best effort cleanup
+
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(

@@ -11,34 +11,37 @@ LLM Council is a 3-stage deliberation system where multiple LLMs collaboratively
 ### Backend Structure (`backend/`)
 
 **`config.py`**
-- Contains `COUNCIL_MODELS` (list of OpenRouter model identifiers)
-- Contains `CHAIRMAN_MODEL` (model that synthesizes final answer)
-- Uses environment variable `OPENROUTER_API_KEY` from `.env`
+- Contains `COUNCIL_MODELS` (diverse models from 4 different providers via SiliconFlow)
+- Contains `CHAIRMAN_MODEL` (separate model NOT in the council, avoids bias)
+- Contains `TITLE_MODEL` for conversation title generation
+- Uses environment variable `OPENROUTER_API_KEY` from `.env` (maps to `SILICONFLOW_API_KEY` internally)
 - Backend runs on **port 8001** (NOT 8000 - user had another app on 8000)
 
 **`openrouter.py`**
-- `query_model()`: Single async model query
+- `query_model()`: Single async model query via SiliconFlow API
 - `query_models_parallel()`: Parallel queries using `asyncio.gather()`
-- Returns dict with 'content' and optional 'reasoning_details'
+- Returns dict with 'content' and optional 'reasoning_content' (for thinking models like R1)
 - Graceful degradation: returns None on failure, continues with successful responses
 
 **`council.py`** - The Core Logic
 - `stage1_collect_responses()`: Parallel queries to all council models
 - `stage2_collect_rankings()`:
   - Anonymizes responses as "Response A, B, C, etc."
+  - **Self-exclusion**: Each model only evaluates OTHER models' responses (not its own)
   - Creates `label_to_model` mapping for de-anonymization
   - Prompts models to evaluate and rank (with strict format requirements)
   - Returns tuple: (rankings_list, label_to_model_dict)
   - Each ranking includes both raw text and `parsed_ranking` list
 - `stage3_synthesize_final()`: Chairman synthesizes from all responses + rankings
-- `parse_ranking_from_text()`: Extracts "FINAL RANKING:" section, handles both numbered lists and plain format
+- `parse_ranking_from_text()`: Extracts "FINAL RANKING:" section, handles numbered lists, plain format, Chinese markers ("最终排名："), and Chinese labels ("回答A")
 - `calculate_aggregate_rankings()`: Computes average rank position across all peer evaluations
 
 **`storage.py`**
 - JSON-based conversation storage in `data/conversations/`
+- **File locking** (`fcntl.flock`) for concurrency safety on read-modify-write operations
 - Each conversation: `{id, created_at, messages[]}`
-- Assistant messages contain: `{role, stage1, stage2, stage3}`
-- Note: metadata (label_to_model, aggregate_rankings) is NOT persisted to storage, only returned via API
+- Assistant messages contain: `{role, stage1, stage2, stage3, metadata}`
+- Metadata (label_to_model, aggregate_rankings) is now **persisted** alongside stages
 
 **`main.py`**
 - FastAPI app with CORS enabled for localhost:5173 and localhost:3000
@@ -111,8 +114,8 @@ This strict format allows reliable parsing while still getting thoughtful evalua
 
 ## Important Implementation Details
 
-### Relative Imports
-All backend modules use relative imports (e.g., `from .config import ...`) not absolute imports. This is critical for Python's module system to work correctly when running as `python -m backend.main`.
+### Imports
+Backend modules use absolute imports (e.g., `from config import ...`). Run as `python -m backend.main` from project root.
 
 ### Port Configuration
 - Backend: 8001 (changed from 8000 to avoid conflict)
@@ -123,14 +126,14 @@ All backend modules use relative imports (e.g., `from .config import ...`) not a
 All ReactMarkdown components must be wrapped in `<div className="markdown-content">` for proper spacing. This class is defined globally in `index.css`.
 
 ### Model Configuration
-Models are hardcoded in `backend/config.py`. Chairman can be same or different from council members. The current default is Gemini as chairman per user preference.
+Models are hardcoded in `backend/config.py`. Chairman MUST be different from council members to avoid bias. Current setup uses 4 diverse council models (DeepSeek-R1, Qwen3.5, Kimi-K2, GLM-4.6) with DeepSeek-V3.2 as chairman.
 
 ## Common Gotchas
 
 1. **Module Import Errors**: Always run backend as `python -m backend.main` from project root, not from backend directory
 2. **CORS Issues**: Frontend must match allowed origins in `main.py` CORS middleware
-3. **Ranking Parse Failures**: If models don't follow format, fallback regex extracts any "Response X" patterns in order
-4. **Missing Metadata**: Metadata is ephemeral (not persisted), only available in API responses
+3. **Ranking Parse Failures**: If models don't follow format, fallback regex extracts any "Response X" patterns in order. Also handles Chinese markers ("最终排名：") and Chinese labels ("回答A")
+4. **R1 Reasoning Content**: DeepSeek-R1 returns thinking process in `reasoning_content` field. This is captured and shown to peer reviewers wrapped in `<thinking>` tags
 
 ## Future Enhancement Ideas
 

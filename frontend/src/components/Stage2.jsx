@@ -2,14 +2,18 @@ import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import './Stage2.css';
 
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function deAnonymizeText(text, labelToModel) {
   if (!labelToModel) return text;
 
   let result = text;
-  // Replace each "Response X" with the actual model name
+  // Replace each "Response X" with the actual model name (escape for regex safety)
   Object.entries(labelToModel).forEach(([label, model]) => {
     const modelShortName = model.split('/')[1] || model;
-    result = result.replace(new RegExp(label, 'g'), `**${modelShortName}**`);
+    result = result.replace(new RegExp(escapeRegExp(label), 'g'), `**${modelShortName}**`);
   });
   return result;
 }
